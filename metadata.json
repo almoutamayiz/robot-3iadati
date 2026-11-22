@@ -1,0 +1,6 @@
+{
+  "name": "3iadati Robot",
+  "description": "مساعد عيادتي الذكي — روبوت تفاعلي بالصوت والنص لإدارة العيادات ومساعدة الأطباء",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
