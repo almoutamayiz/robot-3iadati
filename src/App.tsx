@@ -26,14 +26,12 @@ import { ChatHistorySheet, ChatTranscriptContent } from './components/ChatHistor
 import { NotificationsSheet } from './components/NotificationsSheet';
 import {
   calculatePatientAge,
-  fetchClinicById,
   fetchClinicSnapshot,
   getClinicDisplayName,
   getPatientDisplayName,
   resolveClinicForAuthUser,
   sendClinicTeamMessage,
   supabase,
-  updateClinicRobotDefaults,
 } from './lib/supabase';
 import {
   DEFAULT_ROBOT_PREFERENCES,
@@ -570,28 +568,9 @@ export default function App() {
         }
       }
 
-      // Case B: Restored Authenticated Doctor Session (verified previously with email & password)
-      if (saved?.clinicId && saved.isAuthenticated && saved.role === 'doctor') {
-        const restoredClinic = await fetchClinicById(saved.clinicId);
-        if (cancelled) return;
-        const emailMatches =
-          restoredClinic &&
-          saved.accountEmail &&
-          (!restoredClinic.email ||
-            restoredClinic.email.toLowerCase() === saved.accountEmail.toLowerCase());
-        if (restoredClinic && emailMatches) {
-          setClinic(restoredClinic);
-          setRole('doctor');
-          setIsAuthenticatedSession(true);
-          setAccountEmail(saved.accountEmail || restoredClinic.email || null);
-          setAccountName(saved.accountName || restoredClinic.doctor_name || null);
-          const uid = saved.userIdForPrefs || restoredClinic.owner_user_id || restoredClinic.id;
-          setSessionUserId(uid);
-          await loadClinicContext(restoredClinic, 'doctor', uid);
-          return;
-        }
-        writeSavedSession(null);
-      }
+      // No Auth session means no medical-data session. A localStorage record is
+      // never sufficient to restore access to patients, appointments, or visits.
+      writeSavedSession(null);
 
       // Unauthenticated: require explicit Doctor Email + Password sign-in first
       setClinic(null);
@@ -628,7 +607,7 @@ export default function App() {
 
   // Real-time Supabase subscription matching platform tables + 25s poll fallback
   useEffect(() => {
-    if (!clinic || clinic.id === 'clinic_demo_local') return;
+    if (!authUser || !isAuthenticatedSession || !clinic || clinic.id === 'clinic_demo_local') return;
     const cId = clinic.id;
 
     const channel = supabase
@@ -691,7 +670,7 @@ export default function App() {
       window.clearInterval(pollId);
       supabase.removeChannel(channel);
     };
-  }, [clinic, refreshLiveClinicData]);
+  }, [authUser, clinic, isAuthenticatedSession, refreshLiveClinicData]);
 
   const handlePlatformLoginSuccess = async (params: {
     clinic: ClinicRecord;
@@ -701,6 +680,11 @@ export default function App() {
     accountName: string;
     userIdForPrefs: string;
   }) => {
+    if (!params.authUser) {
+      setBubbleText('تم رفض الدخول: يلزم حساب Supabase Auth للوصول إلى بيانات العيادة.');
+      setConnectOpen(true);
+      return;
+    }
     setAuthUser(params.authUser);
     setClinic(params.clinic);
     setRole(params.role);
@@ -767,13 +751,6 @@ export default function App() {
     if (clinic && clinic.id !== 'clinic_demo_local') {
       setSyncSaving(true);
       await saveUserRobotPrefsToSupabase(userKey, clinic.id, next);
-      await updateClinicRobotDefaults(clinic.id, {
-        theme: next.theme,
-        outfit: next.outfit,
-        motion: next.motion,
-        size: next.size,
-        behaviors: next.behaviors,
-      });
       setSyncSaving(false);
     }
   };
