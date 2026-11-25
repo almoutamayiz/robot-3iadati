@@ -26,6 +26,8 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
 
 const SAFE_CLINIC_COLUMNS =
   'id, owner_user_id, name, slug, specialty, description, phone, email, address, city, wilaya, is_public, doctor_name, assistant_name, consultation_fee, is_emergency_closed, emergency_close_reason, robot_defaults';
+const PUBLIC_CLINIC_COLUMNS =
+  'id, name, slug, specialty, description, phone, email, address, city, wilaya, is_public, doctor_name, assistant_name, consultation_fee, is_emergency_closed, emergency_close_reason';
 
 export const ACTIVE_WAITING_STATUSES = new Set([
   'waiting',
@@ -70,7 +72,10 @@ export interface PlatformLoginResult {
   error: string | null;
 }
 
-// --- Doctor-Only Platform Auth (Supabase Auth or clinics.doctor_password via verify_clinic_login) ---
+// --- Doctor-only platform authentication ---
+// Medical data access requires a real Supabase Auth session because RLS uses auth.uid().
+// The legacy clinic-password RPC cannot create auth.uid(), so it must never be treated as
+// an authenticated medical-data session.
 
 export async function signInPlatformAccount(
   emailInput: string,
@@ -91,45 +96,7 @@ export async function signInPlatformAccount(
   }
 
   try {
-    // 0. Prefer server-side PostgreSQL RPC (never sends password columns over REST)
-    const { data: rpcData, error: rpcErr } = await supabase.rpc('verify_clinic_login', {
-      p_email: email,
-      p_password: password,
-    });
-    if (!rpcErr && rpcData && typeof rpcData === 'object') {
-      const payload = rpcData as {
-        success?: boolean;
-        role?: ClinicRole;
-        clinic?: ClinicRecord;
-        account_name?: string;
-        user_id_for_prefs?: string;
-      };
-      if (payload.success && payload.clinic) {
-        if (payload.role === 'receptionist') {
-          return {
-            success: false,
-            authUser: null,
-            clinic: null,
-            role: 'doctor',
-            accountEmail: email,
-            accountName: '',
-            userIdForPrefs: '',
-            error: 'هذا التطبيق مخصص للأطباء فقط. يرجى تسجيل الدخول بحساب الطبيب.',
-          };
-        }
-        return {
-          success: true,
-          authUser: null,
-          clinic: payload.clinic,
-          role: 'doctor',
-          accountEmail: email,
-          accountName: payload.account_name || payload.clinic.doctor_name || 'الطبيب',
-          userIdForPrefs:
-            payload.user_id_for_prefs || payload.clinic.owner_user_id || payload.clinic.id,
-          error: null,
-        };
-      }
-    }
+    // Supabase Auth is required for medical-data access and RLS isolation.
 
     // 2. Try Doctor authentication via Supabase Auth
     const { data: authData, error: authErr } = await supabase.auth.signInWithPassword({
@@ -166,36 +133,6 @@ export async function signInPlatformAccount(
       };
     }
 
-    // 3. Fallback Doctor authentication via public.clinics.doctor_password
-    const { data: doctorClinics } = await supabase
-      .from('clinics')
-      .select(`${SAFE_CLINIC_COLUMNS}, doctor_password`)
-      .ilike('email', email)
-      .limit(5);
-
-    if (Array.isArray(doctorClinics) && doctorClinics.length > 0) {
-      const matchedDoctor = doctorClinics.find(
-        (c) => String((c as Record<string, unknown>).doctor_password || '') === password
-      );
-      if (matchedDoctor) {
-        const { doctor_password: _omit, ...safeClinic } = matchedDoctor as Record<
-          string,
-          unknown
-        >;
-        const clinic = safeClinic as unknown as ClinicRecord;
-        return {
-          success: true,
-          authUser: null,
-          clinic,
-          role: 'doctor',
-          accountEmail: clinic.email || email,
-          accountName: clinic.doctor_name || 'الطبيب',
-          userIdForPrefs: clinic.owner_user_id || clinic.id,
-          error: null,
-        };
-      }
-    }
-
     return {
       success: false,
       authUser: null,
@@ -204,7 +141,7 @@ export async function signInPlatformAccount(
       accountEmail: email,
       accountName: '',
       userIdForPrefs: '',
-      error: 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
+      error: authErr?.message || 'البريد الإلكتروني أو كلمة المرور غير صحيحة.',
     };
   } catch (err) {
     return {
@@ -270,10 +207,6 @@ export async function resolveClinicForAuthUser(authUser: User): Promise<{
     ...doctorLinkIds.map((cid) =>
       supabase.from('clinics').select(SAFE_CLINIC_COLUMNS).eq('id', cid).maybeSingle()
     ),
-    supabase.from('public_clinics').select('*').eq('owner_user_id', authUser.id),
-    authUser.email
-      ? supabase.from('public_clinics').select('*').ilike('email', authUser.email)
-      : Promise.resolve({ data: null, error: null }),
   ]);
 
   for (const res of clinicLookups) {
@@ -306,7 +239,7 @@ export async function fetchClinicById(clinicId: string): Promise<ClinicRecord | 
 
     const { data: pubData, error: pubErr } = await supabase
       .from('public_clinics')
-      .select('*')
+      .select(PUBLIC_CLINIC_COLUMNS)
       .eq('id', clinicId)
       .maybeSingle();
     if (!pubErr && pubData) return pubData as ClinicRecord;
@@ -338,36 +271,59 @@ export async function fetchClinicSnapshot(clinicId: string): Promise<ClinicLiveS
     };
   }
 
+  const { data: sessionData } = await supabase.auth.getSession();
+  if (!sessionData.session?.user) {
+    return {
+      patients: [],
+      waitingList: [],
+      appointments: [],
+      recentVisits: [],
+      prescriptions: [],
+      messages: [],
+      error: 'لا يمكن تحميل البيانات الطبية دون جلسة Supabase Auth صالحة.',
+    };
+  }
+
   const [patientsRes, appointmentsRes, visitsRes, prescriptionsRes, messagesRes] =
     await Promise.all([
       supabase
         .from('patients')
-        .select('*')
+        .select(
+          'id, clinic_id, patient_number, full_name, date_of_birth, phone, email, address, city, gender, has_social_security, chronic_diseases, allergies, blood_group, medical_notes, created_at, updated_at'
+        )
         .eq('clinic_id', clinicId)
         .order('created_at', { ascending: false })
         .limit(80),
       supabase
         .from('appointments')
-        .select('*')
+        .select(
+          'id, clinic_id, patient_id, doctor_id, service_id, start_at, end_at, booking_date, appointment_time, status, queue_number, patient_name, patient_phone, reason_for_visit, booking_source, administrative_notes, fee, handed_to_doctor_at, completed_at, created_at, updated_at'
+        )
         .eq('clinic_id', clinicId)
         .order('queue_number', { ascending: true })
         .order('start_at', { ascending: true })
         .limit(60),
       supabase
         .from('medical_visits')
-        .select('*')
+        .select(
+          'id, clinic_id, patient_id, doctor_id, appointment_id, visit_date, clinical_notes, diagnosis, treatment_notes, created_at'
+        )
         .eq('clinic_id', clinicId)
         .order('created_at', { ascending: false })
         .limit(25),
       supabase
         .from('prescriptions')
-        .select('*')
+        .select(
+          'id, clinic_id, patient_id, doctor_id, visit_id, patient_name, doctor_name, advice, medications, created_at'
+        )
         .eq('clinic_id', clinicId)
         .order('created_at', { ascending: false })
         .limit(20),
       supabase
         .from('clinic_messages')
-        .select('*')
+        .select(
+          'id, clinic_id, sender_role, sender_name, message, is_read, created_at'
+        )
         .eq('clinic_id', clinicId)
         .order('created_at', { ascending: false })
         .limit(30),
@@ -429,18 +385,9 @@ export async function passPatientToDoctor(
   try {
     const { error } = await supabase.rpc('pass_patient_to_doctor', {
       p_appointment_id: appointmentId,
-      p_doctor_id: doctorId || '',
+      p_doctor_id: doctorId || null,
     });
-    if (!error) return true;
-
-    const { error: updErr } = await supabase
-      .from('appointments')
-      .update({
-        status: 'in_visit',
-        handed_to_doctor_at: new Date().toISOString(),
-      })
-      .eq('id', appointmentId);
-    return !updErr;
+    return !error;
   } catch {
     return false;
   }
@@ -450,33 +397,12 @@ export async function searchAdwiaCatalog(query: string): Promise<AdwiaDrugRecord
   const clean = query.trim().replace(/[,()]/g, ' ');
   if (!clean) return [];
   try {
-    const { data, error } = await supabase
-      .from('adwia')
-      .select(
-        'id, name, dci, dosage, pharmaceutical_form, laboratory, category, packaging, code, type, status, is_active'
-      )
-      .eq('is_active', true)
-      .or(`name.ilike.%${clean}%,dci.ilike.%${clean}%,category.ilike.%${clean}%`)
-      .limit(15);
-    if (!error && data && data.length > 0) {
-      return data as AdwiaDrugRecord[];
-    }
-    const { data: fallbackData } = await supabase
-      .from('adwia')
-      .select(
-        'id, name, dci, dosage, pharmaceutical_form, laboratory, category, type, status, is_active'
-      )
-      .eq('is_active', true)
-      .limit(60);
-    if (!fallbackData) return [];
-    const lower = clean.toLowerCase();
-    return (fallbackData as AdwiaDrugRecord[])
-      .filter((row) =>
-        [row.name, row.dci, row.category, row.laboratory]
-          .filter(Boolean)
-          .some((v) => String(v).toLowerCase().includes(lower))
-      )
-      .slice(0, 15);
+    const { data, error } = await supabase.rpc('search_adwia_smart', {
+      search_term: clean.slice(0, 100),
+      max_results: 15,
+    });
+    if (error || !data) return [];
+    return data as AdwiaDrugRecord[];
   } catch {
     return [];
   }
@@ -514,20 +440,4 @@ export async function markClinicMessagesRead(clinicId: string): Promise<void> {
       .eq('clinic_id', clinicId)
       .eq('is_read', false);
   } catch { /* ignore */ }
-}
-
-export async function updateClinicRobotDefaults(
-  clinicId: string,
-  defaults: unknown
-): Promise<boolean> {
-  if (!clinicId || clinicId === 'clinic_demo_local') return false;
-  try {
-    const { error } = await supabase
-      .from('clinics')
-      .update({ robot_defaults: defaults })
-      .eq('id', clinicId);
-    return !error;
-  } catch {
-    return false;
-  }
 }
