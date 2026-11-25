@@ -261,10 +261,13 @@ export async function fetchUserRobotPrefsFromSupabase(
 ): Promise<RobotPreferences | null> {
   if (!userKey || !clinicId) return null;
   try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const authUserId = sessionData.session?.user.id;
+    if (!authUserId) return null;
     const { data, error } = await supabase
       .from('user_robot_preferences')
       .select('preferences')
-      .eq('user_id', userKey)
+      .eq('user_id', authUserId)
       .eq('clinic_id', clinicId)
       .maybeSingle();
     if (error || !data?.preferences) return null;
@@ -281,9 +284,12 @@ export async function saveUserRobotPrefsToSupabase(
 ): Promise<boolean> {
   if (!userKey || !clinicId) return false;
   try {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const authUserId = sessionData.session?.user.id;
+    if (!authUserId) return false;
     const { error } = await supabase.from('user_robot_preferences').upsert(
       {
-        user_id: userKey,
+        user_id: authUserId,
         clinic_id: clinicId,
         preferences: prefs,
         updated_at: new Date().toISOString(),
