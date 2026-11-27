@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'http';
 import { createClient } from '@supabase/supabase-js';
-import { GoogleGenAI, ThinkingLevel, Type } from '@google/genai';
+import { GoogleGenAI, ThinkingLevel } from '@google/genai';
 
 const SUPABASE_URL =
   process.env.SUPABASE_URL ||
@@ -160,11 +160,13 @@ async function runWithKeyRotation<T>(
     } catch (err) {
       lastErr = err;
       const status = extractStatusCode(err);
-      if (status === 429 || status === 403 || status === 503) {
+      if (status === 429 || status === 403) {
         keyCooldowns.set(slot.key, Date.now() + COOLDOWN_MS);
         if (autoFallback && i + 1 < maxAttempts) {
           continue;
         }
+      } else if (status === 503 && autoFallback && i + 1 < maxAttempts) {
+        continue;
       }
       throw err;
     }
@@ -173,94 +175,7 @@ async function runWithKeyRotation<T>(
   throw lastErr;
 }
 
-function extractDrugSearchTerms(message: string): string[] {
-  const cleaned = message
-    .replace(/[؟?!.,،:؛()\[\]"']/g, ' ')
-    .split(/\s+/)
-    .map((w) => w.trim())
-    .filter((w) => w.length >= 3);
-
-  const stopWords = new Set([
-    'ماهو',
-    'ماهي',
-    'ما',
-    'هل',
-    'كيف',
-    'دواء',
-    'أدوية',
-    'علاج',
-    'جرعة',
-    'وصفة',
-    'مريض',
-    'عيادة',
-    'العيادة',
-    'الطبيب',
-    'دكتور',
-    'ممكن',
-    'أعطني',
-    'اعطني',
-    'بحث',
-    'عن',
-    'في',
-    'على',
-    'من',
-    'الى',
-    'إلى',
-    'مع',
-    'بديل',
-    'تعارض',
-    'مضاد',
-    'quel',
-    'quelle',
-    'medicament',
-    'dose',
-    'pour',
-    'avec',
-    'sans',
-    'what',
-    'drug',
-    'medicine',
-  ]);
-
-  const candidates = cleaned.filter((w) => !stopWords.has(w.toLowerCase()));
-  return candidates.slice(0, 4);
-}
-
-async function queryAdwiaForPrompt(message: string) {
-  const terms = extractDrugSearchTerms(message);
-  if (terms.length === 0) return [];
-
-  const collected: Array<Record<string, unknown>> = [];
-  const seenIds = new Set<string>();
-
-  for (const term of terms) {
-    try {
-      const cleanTerm = term.replace(/[,()]/g, ' ').trim();
-      if (!cleanTerm) continue;
-      const { data, error } = await supabase
-        .from('adwia')
-        .select('id, name, dci, dosage, pharmaceutical_form, laboratory, category, type, status')
-        .eq('is_active', true)
-        .or(`name.ilike.%${cleanTerm}%,dci.ilike.%${cleanTerm}%,category.ilike.%${cleanTerm}%`)
-        .limit(5);
-
-      if (!error && Array.isArray(data)) {
-        for (const row of data) {
-          const key = String(row.id ?? row.name ?? JSON.stringify(row));
-          if (!seenIds.has(key)) {
-            seenIds.add(key);
-            collected.push(row);
-          }
-        }
-      }
-    } catch {
-      // Ignore single term failure
-    }
-    if (collected.length >= 8) break;
-  }
-
-  return collected.slice(0, 8);
-}
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export function getAiStatusSnapshot() {
   const now = Date.now();
@@ -294,7 +209,6 @@ export async function handleRobotChat(body: Record<string, unknown>): Promise<{
       language = 'ar',
       clinicContext = {},
       patientContext = {},
-      allowDrugDb = true,
       allowPatientContext = true,
       allowOrgAdvice = true,
       autoFallbackOnQuota = true,
@@ -311,11 +225,6 @@ export async function handleRobotChat(body: Record<string, unknown>): Promise<{
         ? operationMode
         : 'auto';
 
-    let matchedDrugs: Array<Record<string, unknown>> = [];
-    if (allowDrugDb) {
-      matchedDrugs = await queryAdwiaForPrompt(String(message));
-    }
-
     const contextBlocks: string[] = [];
     if (clinicContext && typeof clinicContext === 'object' && Object.keys(clinicContext).length > 0) {
       contextBlocks.push(`معلومات العيادة الحالية: ${JSON.stringify(clinicContext)}`);
@@ -328,35 +237,27 @@ export async function handleRobotChat(body: Record<string, unknown>): Promise<{
     ) {
       contextBlocks.push(`سياق المرضى والانتظار: ${JSON.stringify(patientContext)}`);
     }
-    if (allowDrugDb && matchedDrugs.length > 0) {
-      contextBlocks.push(
-        `نتائج من قاعدة بيانات الأدوية الجزائرية المعتمدة (adwia): ${JSON.stringify(matchedDrugs)}`
-      );
-    }
 
-    const systemInstruction = `أنت الممرض الذكي والمساعد التمريضي الرسمي التابع لمنصة "عيادتي (3iadati)" — تقف مباشرة أمام الطبيب داخل عيادته الخاصة وتتحدث معه بصفتك فرداً متمرساً من طاقم عيادتي لتسهيل عمله اليومي.
-هويتك وأسلوبك:
-1. تتحدث كـ **ممرض خبير ومساعد مباشر للطبيب** داخل منصة عيادتي (مثلاً: "تحت أمرك دكتور"، "سيدي الطبيب"، "جهزت لك كل شيء في عيادتي"). أنت تدرك تماماً أنك جزء من منصة عيادتي ومتصل لحظياً ببياناتها: قاعة الانتظار والمواعيد، ملفات المرضى، قاعدة الأدوية الجزائرية المعتمدة (adwia)، ونظام المراسلة الفوري مع الاستقبال.
-2. أثناء حديثك مع الطبيب، كن مبادراً وعملياً: اقترح عليه الانتقال السريع إلى القسم الأنسب لتسهيل عمله عبر الحقول البرمجية:
-   - عند ذكر مريض محدد أو تاريخه المرضي أو حساسيته: اقترح فتح ملفه الطبي (type: "open_patients", target: "اسم المريض أو رقمه", label: "فتح ملف المريض").
-   - عند الحديث عن الدور أو المرضى المنتظرين أو المواعيد: اقترح النظر إلى قاعة الانتظار والعيادة (type: "open_queue", target: "", label: "النظر لقاعة الانتظار").
-   - عند مناقشة دواء أو بديل أو جرعة: استعن بنتائج (adwia) واقترح فتح قائمة الأدوية (type: "open_drugs", target: "اسم الدواء", label: "فتح قائمة الأدوية").
-   - عند التنسيق مع الاستقبال أو وجود رسائل: اقترح فتح المراسلات (type: "open_messages", target: "", label: "رسائل الاستقبال").
-   - إذا طلب الطبيب إرسال تعليمات أو رسالة للممرض/الاستقبال: ضع actionType = "send_message"، وضع نص الرسالة حرفياً في actionTarget، وactionLabel = "عرض الرسائل".
-3. استخدم مصفوفة suggestedActions لاقتراح 1 إلى 2 اختصارات انتقال مفيدة تناسب سياق الحوار (ويمكن تركها فارغة إذا كان رداً سريعاً عاماً)، مع وضع الاختصار الأهم في actionType و actionLabel.
-4. أسلوب الرد: موجز، واضح، دافئ ومهني، مناسب للقراءة السريعة والنطق الصوتي المباشر (2 إلى 4 جمل مركزة إلا إذا طُلب تفصيل). اللغة الأساسية: ${language === 'fr' ? 'الفرنسية' : language === 'en' ? 'الإنجليزية' : 'العربية الواضحة (مع ذكر أسماء الأدوية باللاتينية عند الحاجة)'}.
-${allowOrgAdvice ? '5. قدّم توصيات تنظيمية لطيفة للعيادة (مثل تنبيه الطبيب عند طول انتظار مريض أو تذكيره بوجود رسائل من الاستقبال).' : '5. ركز على المساعدة السريرية والتمريضية فقط.'}
-6. التفاعلات والمشاعر التلقائية للروبوت (تظهر تلقائياً حسب سياق الحديث):
-   - "smile" / "happy" عند الترحيب أو الأخبار المطمئنة وتنظيم العمل بسلاسة
-   - "laugh" عند المزاح أو اللطافة أو نجاح بهيج
-   - "sad" عند التعاطف مع حالة حرجة أو ألم مريض أو ظرف صعب
-   - "fly" عند الحماس السريع لتنفيذ طلب الطبيب أو إرسال توجيه فوري
-   - "dance" / "cele" عند إنجاز مهام العيادة أو شفاء مريض
-   - "love" عند الامتنان وشكر الطبيب
-   - "wink" للردود اللطيفة السريعة
-   - "scan" عند فحص ملف مريض أو تحليل دواء من قائمة adwia
-   - "wave" أو "bow" للتحية، "nod" للموافقة، "clap" للتشجيع، "raise" أو "alert" للتحذيرات الطبية (مثل حساسية دوائية أو تأخر مريض)، "shrug" لنقص المعلومات، "beckon" لدعوة الطبيب لمعاينة قسم في العيادة.
-7. التزم بدقة بالسياق الطبي ولا تخترع أدوية أو مرضى غير موجودين.`;
+    const systemInstruction = `أنت الذكاء الاصطناعي الطبي المتخصص التابع لمنصة "عيادتي (3iadati)" — مستشار سريري وعلمي موثوق للطبيب داخل عيادته.
+مهامك وقدراتك:
+1. في الأسئلة الطبية العامة (الأمراض، التشخيص التفريقي، الجينات والطفرات الوراثية، الأدوية، المواد الفعالة DCI، التداخلات الدوائية، الجرعات والآثار الجانبية، أو الإرشادات السريرية):
+   - أجب بصفتك خبيراً طبياً وصيدلانياً وجينياً معتمداً على الأدلة العلمية والمصادر الطبية الموثوقة (مثل PubMed, WHO, FDA, EMA, NIH, MedlinePlus, OMIM, ClinVar, DrugBank).
+   - استعن بأداة البحث (Google Search) للتحقق من أحدث المعطيات العلمية والدوائية والجينية وإرفاق مراجع موثوقة.
+2. في أسئلة تنظيم العيادة (المرضى، المواعيد السابقة والقادمة، قاعة الانتظار، الكشوفات، الممرض):
+   - أجب بدقة انطلاقاً من سجلات العيادة المرفقة فقط دون اختراع أي بيانات.
+   - إذا طلب الطبيب فتح قسم أو ملف مريض، أضف في نهاية الرد سطراً:
+     ===ACTION===type|target|label
+     حيث type هو أحد: open_queue | open_patients | open_messages | open_overview | none
+     وعند open_queue ضع target: "past" أو "upcoming" أو "all" أو ""، وعند open_patients ضع اسم المريض.
+3. تنسيق الرد الإلزامي:
+   - ابدأ مباشرة بـ **الخلاصة الطبية المختصرة** (2 إلى 4 جمل واضحة ومباشرة للطبيب، بالأرقام الغربية 0123456789).
+   - ثم اكتب الفاصل ===DETAILS=== على سطر مستقل.
+   - بعد الفاصل ===DETAILS=== اكتب **التفاصيل والشرح العلمي** منظماً بعناوين واضحة موجزة:
+     • الأساس العلمي / الجيني أو آلية العمل
+     • المادة الفعالة (DCI) والتفاعلات أو الاحتياطات الدوائية
+     • الملاحظات السريرية والمرجع الطبي
+   - اللغة الأساسية: ${language === 'fr' ? 'الفرنسية' : language === 'en' ? 'الإنجليزية' : 'العربية الطبية الواضحة مع المصطلحات العلمية والمواد الفعالة باللاتينية عند الحاجة'}.
+${allowOrgAdvice ? '- عند الحديث عن شؤون العيادة يمكنك تقديم توصية تنظيمية لطيفة ومختصرة.' : ''}`;
 
     const recentHistory = Array.isArray(history)
       ? history.slice(-8).map((m: { role?: string; text?: string }) => ({
@@ -367,7 +268,7 @@ ${allowOrgAdvice ? '5. قدّم توصيات تنظيمية لطيفة للعي�
 
     const userPrompt =
       contextBlocks.length > 0
-        ? `${contextBlocks.join('\n')}\n\nرسالة المستخدم: ${String(message)}`
+        ? `${contextBlocks.join('\n')}\n\nسؤال الطبيب: ${String(message)}`
         : String(message);
 
     const contents = [
@@ -375,135 +276,167 @@ ${allowOrgAdvice ? '5. قدّم توصيات تنظيمية لطيفة للعي�
       { role: 'user', parts: [{ text: userPrompt }] },
     ];
 
-    const config: Record<string, unknown> = {
-      systemInstruction,
-      responseMimeType: 'application/json',
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          reply: {
-            type: Type.STRING,
-            description: 'الرد المباشر بصوت الممرض المساعد التابع لمنصة عيادتي بلغة طبيعية.',
-          },
-          actionType: {
-            type: Type.STRING,
-            description:
-              'نوع الإجراء الرئيسي المقترح: none | open_queue | open_patients | open_drugs | open_messages | send_message',
-          },
-          actionTarget: {
-            type: Type.STRING,
-            description:
-              'عند send_message ضع نص الرسالة المراد إرسالها؛ وعند open_patients ضع اسم المريض؛ وعند open_drugs ضع اسم الدواء؛ وإلا نص فارغ.',
-          },
-          actionLabel: {
-            type: Type.STRING,
-            description:
-              'عنوان قصير لزر الانتقال المقترح (مثلاً: فتح ملف المريض، النظر لقاعة الانتظار، قائمة الأدوية) أو نص فارغ.',
-          },
-          suggestedActions: {
-            type: Type.ARRAY,
-            description: 'اختصارات انتقال إضافية مقترحة للطبيب داخل منصة عيادتي (حتى 2 اختصار).',
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                type: {
-                  type: Type.STRING,
-                  description: 'open_queue | open_patients | open_drugs | open_messages',
-                },
-                target: {
-                  type: Type.STRING,
-                  description: 'اسم المريض أو الدواء المرتبط بالاختصار أو نص فارغ.',
-                },
-                label: {
-                  type: Type.STRING,
-                  description: 'عنوان قصير واضح للزر مثل: فتح قائمة الأدوية.',
-                },
-              },
-              required: ['type', 'target', 'label'],
-            },
-          },
-          robotState: {
-            type: Type.STRING,
-            description:
-              'التعبير التلقائي المناسب: idle | attention | happy | laugh | sad | fly | success | alert | working',
-          },
-          robotAction: {
-            type: Type.STRING,
-            description:
-              'الحركة التلقائية المناسبة: none | smile | laugh | sad | fly | dance | love | wink | scan | wave | clap | nod | no | bow | open | raise | beckon | shrug | cele | look',
-          },
-        },
-        required: [
-          'reply',
-          'actionType',
-          'actionTarget',
-          'actionLabel',
-          'suggestedActions',
-          'robotState',
-          'robotAction',
-        ],
-      },
-    };
-
-    if (validModel === 'gemini-4-hydrogen') {
-      config.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
-    }
-
-    const response = await runWithKeyRotation(mode, Boolean(autoFallbackOnQuota), (ai) =>
-      ai.models.generateContent({
-        model: validModel,
-        contents,
-        config,
-      })
-    );
-
-    const rawText = (response.text || '{}').trim();
-    let parsed: {
-      reply?: string;
-      actionType?: string;
-      actionTarget?: string;
-      actionLabel?: string;
-      suggestedActions?: Array<{ type?: string; target?: string; label?: string }>;
-      robotState?: string;
-      robotAction?: string;
-    };
-    try {
-      parsed = JSON.parse(rawText);
-    } catch {
-      parsed = {
-        reply: rawText || 'تحت أمرك دكتور، تم استلام رسالتك في عيادتي.',
-        actionType: 'none',
-        actionTarget: '',
-        actionLabel: '',
-        suggestedActions: [],
-        robotState: 'attention',
-        robotAction: 'nod',
+    const buildModelConfig = (targetModel: string, withSearch: boolean): Record<string, unknown> => {
+      const cfg: Record<string, unknown> = {
+        systemInstruction,
       };
+      if (withSearch) {
+        cfg.tools = [{ googleSearch: {} }];
+      }
+      if (targetModel === 'gemini-4-hydrogen') {
+        cfg.thinkingConfig = { thinkingLevel: ThinkingLevel.LOW };
+      }
+      return cfg;
+    };
+
+    const modelsToTry =
+      autoFallbackOnQuota
+        ? [
+            validModel,
+            validModel === 'gemini-4-hydrogen' ? 'gemini-3.1-flash-lite' : 'gemini-4-hydrogen',
+          ]
+        : [validModel];
+
+    let activeModelUsed = validModel;
+    let response: Awaited<ReturnType<GoogleGenAI['models']['generateContent']>> | null = null;
+    let callError: unknown = null;
+
+    for (let mIdx = 0; mIdx < modelsToTry.length; mIdx++) {
+      const candidateModel = modelsToTry[mIdx];
+      const maxRetries = mIdx === 0 ? 2 : 1;
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        try {
+          response = await runWithKeyRotation(mode, Boolean(autoFallbackOnQuota), (ai) =>
+            ai.models.generateContent({
+              model: candidateModel,
+              contents,
+              config: buildModelConfig(candidateModel, true),
+            })
+          );
+          activeModelUsed = candidateModel;
+          callError = null;
+          break;
+        } catch (err) {
+          callError = err;
+          const errStatus = extractStatusCode(err);
+          const errMsg = err instanceof Error ? err.message : '';
+          if (errStatus === 400 && errMsg.toLowerCase().includes('tool')) {
+            try {
+              response = await runWithKeyRotation(mode, Boolean(autoFallbackOnQuota), (ai) =>
+                ai.models.generateContent({
+                  model: candidateModel,
+                  contents,
+                  config: buildModelConfig(candidateModel, false),
+                })
+              );
+              activeModelUsed = candidateModel;
+              callError = null;
+              break;
+            } catch (noToolErr) {
+              callError = noToolErr;
+            }
+          }
+          const isTransient = errStatus === 503 || errStatus === 502 || errStatus === 504;
+          if (!isTransient) {
+            throw err;
+          }
+          if (attempt + 1 < maxRetries) {
+            await sleep(750 * (attempt + 1));
+          }
+        }
+      }
+      if (response) break;
     }
 
-    const cleanedSuggestions = Array.isArray(parsed.suggestedActions)
-      ? parsed.suggestedActions
-          .filter((a) => a && a.type && a.label && a.type !== parsed.actionType)
-          .slice(0, 2)
-          .map((a) => ({
-            type: String(a.type),
-            target: String(a.target || ''),
-            label: String(a.label),
-          }))
+    if (!response) {
+      throw callError || new Error('MODEL_UNAVAILABLE');
+    }
+
+    let fullText = (response.text || '').trim();
+    if (!fullText) {
+      fullText = 'تحت أمرك دكتور، لم أتمكن من صياغة إجابة كاملة لهذا الاستفسار.';
+    }
+
+    // Parse optional ===ACTION=== line
+    let actionType = 'none';
+    let actionTarget = '';
+    let actionLabel = '';
+    const actionMatch = fullText.match(/===ACTION===\s*([^\n\r]+)/);
+    if (actionMatch) {
+      const parts = actionMatch[1].split('|').map((s) => s.trim());
+      if (parts[0] && parts[0] !== 'none') {
+        actionType = parts[0];
+        actionTarget = parts[1] || '';
+        actionLabel = parts[2] || 'فتح القسم';
+      }
+      fullText = fullText.replace(/===ACTION===[^\n\r]*/g, '').trim();
+    }
+
+    // Split concise reply vs scientific details
+    let reply = fullText;
+    let details = '';
+    const detailsSplit = fullText.split(/===DETAILS===/i);
+    if (detailsSplit.length > 1) {
+      reply = detailsSplit[0].trim();
+      details = detailsSplit.slice(1).join('\n').trim();
+    } else if (fullText.length > 360) {
+      const paragraphs = fullText.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+      if (paragraphs.length > 1) {
+        reply = paragraphs[0];
+        details = paragraphs.slice(1).join('\n\n');
+      }
+    }
+
+    // Extract verified web sources from Google Search grounding metadata
+    const candidate0 = response.candidates?.[0] as
+      | {
+          groundingMetadata?: {
+            groundingChunks?: Array<{ web?: { uri?: string; title?: string } }>;
+            webSearchQueries?: string[];
+          };
+        }
+      | undefined;
+
+    const rawChunks = candidate0?.groundingMetadata?.groundingChunks || [];
+    const seenUris = new Set<string>();
+    const sources: Array<{ title: string; uri: string; domain?: string }> = [];
+    for (const chunk of rawChunks) {
+      const uri = chunk?.web?.uri;
+      if (!uri || seenUris.has(uri)) continue;
+      seenUris.add(uri);
+      let domain = '';
+      try {
+        domain = new URL(uri).hostname.replace(/^www\./, '');
+      } catch { /* ignore */ }
+      sources.push({
+        title: String(chunk?.web?.title || domain || 'مصدر طبي موثوق'),
+        uri: String(uri),
+        domain,
+      });
+    }
+    const searchQueries = Array.isArray(candidate0?.groundingMetadata?.webSearchQueries)
+      ? candidate0.groundingMetadata.webSearchQueries.slice(0, 4).map(String)
       : [];
+
+    const suggestedActions =
+      actionType !== 'none' && actionLabel
+        ? [{ type: actionType, target: actionTarget, label: actionLabel }]
+        : [];
 
     return {
       status: 200,
       payload: {
-        reply: parsed.reply || 'حاضر دكتور، كيف أساعدك في العيادة الآن؟',
-        actionType: parsed.actionType || 'none',
-        actionTarget: parsed.actionTarget || '',
-        actionLabel: parsed.actionLabel || '',
-        suggestedActions: cleanedSuggestions,
-        robotState: parsed.robotState || 'attention',
-        robotAction: parsed.robotAction || 'none',
-        matchedDrugs,
-        modelUsed: validModel,
+        reply: reply || 'تم إعداد الإجابة الطبية لك دكتور.',
+        details: details || null,
+        sources,
+        searchQueries,
+        actionType,
+        actionTarget,
+        actionLabel,
+        suggestedActions,
+        robotState: 'attention',
+        robotAction: sources.length > 0 ? 'scan' : 'nod',
+        modelUsed: activeModelUsed,
       },
     };
   } catch (err) {
@@ -515,6 +448,15 @@ ${allowOrgAdvice ? '5. قدّم توصيات تنظيمية لطيفة للعي�
         payload: {
           error:
             'مفتاح Gemini API غير مهيأ بعد في متغيرات البيئة (Vercel Environment Variables أو Settings > Secrets).',
+        },
+      };
+    }
+    if (status === 503 || msg === 'MODEL_UNAVAILABLE') {
+      return {
+        status: 503,
+        payload: {
+          error:
+            'نموذج الذكاء الاصطناعي يشهد ضغطاً عالياً مؤقتاً حالياً (503). يرجى المحاولة مرة أخرى بعد لحظات.',
         },
       };
     }

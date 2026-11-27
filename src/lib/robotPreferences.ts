@@ -254,26 +254,67 @@ export function writeLocalClinicRobotDefaults(clinicId: string, defaults: RobotC
   } catch { /* ignore */ }
 }
 
+export function deriveClinicThemeFallback(
+  clinic?: { primary_color?: string | null; admin_theme_color?: string | null } | null
+): RobotTheme {
+  const raw = String(clinic?.admin_theme_color || clinic?.primary_color || '').toLowerCase();
+  if (raw.includes('emerald') || raw.includes('teal') || raw.includes('green')) return 'teal';
+  if (raw.includes('navy') || raw.includes('blue') || raw.includes('indigo') || raw.includes('sky')) return 'navy';
+  if (raw.includes('gold') || raw.includes('amber') || raw.includes('yellow')) return 'gold';
+  if (raw.includes('black') || raw.includes('slate') || raw.includes('dark')) return 'black';
+  return 'white';
+}
+
+export interface RobotPrefsFetchResult {
+  prefs: RobotPreferences | null;
+  matchedUserKey: string | null;
+  error: string | null;
+}
+
 export async function fetchUserRobotPrefsFromSupabase(
   userKey: string,
   clinicId: string,
-  clinicDefaults?: Partial<RobotClinicDefaults> | null
-): Promise<RobotPreferences | null> {
-  if (!userKey || !clinicId) return null;
+  clinicDefaults?: Partial<RobotClinicDefaults> | null,
+  fallbackKeys: string[] = []
+): Promise<RobotPrefsFetchResult> {
+  if (!userKey || !clinicId) return { prefs: null, matchedUserKey: null, error: null };
+  const keysToTry = Array.from(new Set([userKey, ...fallbackKeys].filter(Boolean)));
   try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const authUserId = sessionData.session?.user.id;
-    if (!authUserId) return null;
     const { data, error } = await supabase
       .from('user_robot_preferences')
-      .select('preferences')
-      .eq('user_id', authUserId)
+      .select('user_id, preferences, updated_at')
       .eq('clinic_id', clinicId)
-      .maybeSingle();
-    if (error || !data?.preferences) return null;
-    return normalizeRobotPreferences(data.preferences, clinicDefaults);
-  } catch {
-    return null;
+      .order('updated_at', { ascending: false });
+
+    if (error) {
+      return {
+        prefs: null,
+        matchedUserKey: null,
+        error: `user_robot_preferences: ${error.code || ''} ${error.message}`.trim(),
+      };
+    }
+
+    const rows = Array.isArray(data) ? data : [];
+    const exactMatch =
+      rows.find((r) => r.user_id === userKey && r.preferences) ||
+      rows.find((r) => keysToTry.includes(String(r.user_id)) && r.preferences) ||
+      rows.find((r) => String(r.user_id).startsWith('doc_') && r.preferences);
+
+    if (!exactMatch?.preferences) {
+      return { prefs: null, matchedUserKey: null, error: null };
+    }
+
+    return {
+      prefs: normalizeRobotPreferences(exactMatch.preferences, clinicDefaults),
+      matchedUserKey: String(exactMatch.user_id),
+      error: null,
+    };
+  } catch (err) {
+    return {
+      prefs: null,
+      matchedUserKey: null,
+      error: err instanceof Error ? err.message : 'تعذر قراءة تفضيلات الروبوت',
+    };
   }
 }
 
@@ -281,23 +322,30 @@ export async function saveUserRobotPrefsToSupabase(
   userKey: string,
   clinicId: string,
   prefs: RobotPreferences
-): Promise<boolean> {
-  if (!userKey || !clinicId) return false;
+): Promise<{ success: boolean; error: string | null }> {
+  if (!userKey || !clinicId || clinicId === 'default_clinic' || clinicId === 'clinic_demo_local') {
+    return { success: false, error: null };
+  }
   try {
-    const { data: sessionData } = await supabase.auth.getSession();
-    const authUserId = sessionData.session?.user.id;
-    if (!authUserId) return false;
-    const { error } = await supabase.from('user_robot_preferences').upsert(
-      {
-        user_id: authUserId,
-        clinic_id: clinicId,
-        preferences: prefs,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: 'user_id,clinic_id' }
-    );
-    return !error;
-  } catch {
-    return false;
+    const { error } = await supabase
+      .from('user_robot_preferences')
+      .upsert(
+        {
+          user_id: userKey,
+          clinic_id: clinicId,
+          preferences: prefs,
+          updated_at: new Date().toISOString(),
+        },
+        { onConflict: 'user_id' }
+      );
+    if (error) {
+      return { success: false, error: error.message };
+    }
+    return { success: true, error: null };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'تعذر مزامنة مظهر الروبوت',
+    };
   }
 }

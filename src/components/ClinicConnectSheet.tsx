@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import {
   getClinicDisplayName,
+  getClinicImageUrl,
   resolveClinicForAuthUser,
   signInPlatformAccount,
   signOutPlatformAccount,
@@ -60,16 +61,21 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
   useEffect(() => {
     if (!open) return;
     setAuthError(null);
-    if (isAuthenticatedSession && authUser) {
-      resolveClinicForAuthUser(authUser).then((resolved) => {
-        setOwnedClinics(resolved.clinics);
-      });
-    } else if (isAuthenticatedSession && currentClinic) {
-      setOwnedClinics([currentClinic]);
+    if (isAuthenticatedSession) {
+      const emailToUse = activeAccountEmail || authUser?.email || currentClinic?.email;
+      if (emailToUse) {
+        resolveClinicForAuthUser(authUser || ({ email: emailToUse } as User), emailToUse).then(
+          (resolved) => {
+            setOwnedClinics(resolved.clinics);
+          }
+        );
+      } else if (currentClinic) {
+        setOwnedClinics([currentClinic]);
+      }
     } else {
       setOwnedClinics([]);
     }
-  }, [open, isAuthenticatedSession, authUser, currentClinic]);
+  }, [open, isAuthenticatedSession, authUser, activeAccountEmail, currentClinic]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -126,7 +132,7 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
 
         <div className="flex items-center justify-between px-5 py-3 border-b border-slate-100">
           <div className="flex items-center gap-2.5">
-            <span className="w-9 h-9 rounded-xl bg-sky-50 border border-sky-200/80 text-sky-700 flex items-center justify-center shrink-0">
+            <span className="w-9 h-9 rounded-xl bg-emerald-50 border border-emerald-200/80 text-emerald-700 flex items-center justify-center shrink-0">
               <Stethoscope className="w-4 h-4" />
             </span>
             <div>
@@ -149,9 +155,9 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
         <div className="p-5 space-y-4 overflow-y-auto clean-scroll">
           {isAuthenticatedSession && activeAccountEmail ? (
             <>
-              <div className="p-4 rounded-2xl bg-sky-50/70 border border-sky-200/80 flex items-center justify-between gap-3">
+              <div className="p-4 rounded-2xl bg-emerald-50/70 border border-emerald-200/80 flex items-center justify-between gap-3">
                 <div className="min-w-0">
-                  <p className="text-xs font-semibold text-sky-800">
+                  <p className="text-xs font-semibold text-emerald-800">
                     حساب الطبيب النشط
                     {activeAccountName ? ` · د. ${activeAccountName}` : ''}
                   </p>
@@ -176,6 +182,7 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
                   <div className="divide-y divide-slate-100 border border-slate-200 rounded-2xl overflow-hidden">
                     {ownedClinics.map((c) => {
                       const isActive = currentClinic?.id === c.id;
+                      const thumbUrl = getClinicImageUrl(c);
                       return (
                         <button
                           key={c.id}
@@ -185,24 +192,44 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
                             onClose();
                           }}
                           className={`w-full min-h-[56px] px-4 py-3 flex items-center justify-between text-right transition-colors ${
-                            isActive ? 'bg-sky-50/70' : 'bg-white hover:bg-slate-50'
+                            isActive ? 'bg-emerald-50/70' : 'bg-white hover:bg-slate-50'
                           }`}
                         >
                           <div className="flex items-center gap-3 min-w-0">
-                            <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-700 shrink-0">
-                              <Building2 className="w-4 h-4" />
-                            </div>
+                            {thumbUrl ? (
+                              <img
+                                src={thumbUrl}
+                                alt={getClinicDisplayName(c)}
+                                className="w-9 h-9 rounded-xl object-cover border border-slate-200 shrink-0"
+                              />
+                            ) : (
+                              <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center text-slate-700 shrink-0">
+                                <Building2 className="w-4 h-4" />
+                              </div>
+                            )}
                             <div className="min-w-0">
-                              <p className="text-sm font-bold text-slate-900 truncate">
-                                {getClinicDisplayName(c)}
-                              </p>
-                              <p className="text-xs text-slate-500 truncate">
-                                {[c.specialty, c.city || c.wilaya].filter(Boolean).join(' · ') ||
-                                  'عيادة طبية'}
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <p className="text-sm font-bold text-slate-900 truncate">
+                                  {getClinicDisplayName(c)}
+                                </p>
+                                {c.id === 'clinic_1' && (
+                                  <span className="text-[10px] font-bold text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded">
+                                    العيادة النشطة
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-slate-500 truncate mt-0.5">
+                                {[
+                                  c.specialty,
+                                  c.city || c.wilaya,
+                                  c.id === 'clinic_1' ? 'تحتوي على المرضى والمواعيد' : null,
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ') || 'عيادة طبية'}
                               </p>
                             </div>
                           </div>
-                          {isActive && <Check className="w-4 h-4 text-sky-600 shrink-0" />}
+                          {isActive && <Check className="w-4 h-4 text-emerald-600 shrink-0" />}
                         </button>
                       );
                     })}
@@ -238,7 +265,7 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="example@gmail.com"
                   dir="ltr"
-                  className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-500 text-right"
+                  className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 text-right"
                 />
               </div>
 
@@ -252,14 +279,14 @@ export const ClinicConnectSheet: React.FC<ClinicConnectSheetProps> = ({
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="كلمة المرور"
                   dir="ltr"
-                  className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-sky-500 text-right"
+                  className="w-full min-h-[46px] pr-10 pl-3.5 rounded-xl bg-white border border-slate-200 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-500 text-right"
                 />
               </div>
 
               <button
                 type="submit"
                 disabled={authLoading || !email.trim() || !password}
-                className="w-full min-h-[46px] rounded-xl bg-sky-600 text-white text-sm font-bold hover:bg-sky-700 disabled:opacity-40 flex items-center justify-center gap-2 transition-colors"
+                className="w-full min-h-[46px] rounded-xl bg-emerald-600 text-white text-sm font-bold hover:bg-emerald-700 disabled:opacity-40 flex items-center justify-center gap-2 transition-colors"
               >
                 <LogIn className="w-4 h-4" />
                 <span>{authLoading ? 'جاري التحقق من الحساب...' : 'تسجيل الدخول'}</span>

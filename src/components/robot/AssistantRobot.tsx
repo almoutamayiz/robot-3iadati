@@ -31,6 +31,7 @@ export interface AssistantRobotProps {
   envelopeCount?: number;
   sentBadge?: string | null;
   alertBadge?: number;
+  glowing?: boolean;
   userId?: string;
   bounds?: RobotBounds;
   safeZoneSelectors?: string[];
@@ -52,6 +53,7 @@ export interface AssistantRobotHandle {
   getCurrentPos: () => { x: number; y: number };
   getDimensions: () => { w: number; h: number; rw: number; rh: number };
   play: (action: RobotAction, options?: { ignoreMotionOff?: boolean }) => Promise<void>;
+  deliverToNurse: () => Promise<void>;
   pointAt: (target: RobotPointAtTarget, hand?: RobotHand) => void;
   stopPointing: () => void;
   cancelAction: () => void;
@@ -119,7 +121,7 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
     {
       state, theme = 'white', outfit = [], size = 'm', motion = 'calm', positionMode = 'free',
       embedded = false, speaking = false, carrying = false, envelopeOpen = false, envelopeCount = 0,
-      sentBadge = null, alertBadge = 0, userId = 'default', bounds,
+      sentBadge = null, alertBadge = 0, glowing = false, userId = 'default', bounds,
       safeZoneSelectors = DEFAULT_SAFE_ZONES, dragDisabled = false, pointing = null,
       onOpen, onPositionChange, ariaLabel = 'مساعد عيادتي — انقر للتفاعل', className = '',
     },
@@ -197,6 +199,8 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
     const justDraggedRef = useRef<boolean>(false);
     const internalBusyRef = useRef<boolean>(false);
     const [isDraggingUI, setIsDraggingUI] = useState(false);
+    const [isDeliveringEnvelope, setIsDeliveringEnvelope] = useState(false);
+    const [deliverySentBadge, setDeliverySentBadge] = useState<string | null>(null);
     const lastPoseRef = useRef<{ nx: number; ny: number }>({ nx: 99, ny: 99 });
 
     const fmtTransform = (p: RobotPoint) =>
@@ -564,13 +568,108 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
       return emitPosition(def.x, def.y);
     }, [embedded, emitPosition, getDefaultCornerHome, place, saveHomeToStorage]);
 
+    const deliverToNurse = useCallback(async () => {
+      const el = robRef.current;
+      const id = ++gidRef.current;
+      actionBusyRef.current = true;
+      manualPointingRef.current = false;
+      setDeliverySentBadge(null);
+      setIsDeliveringEnvelope(true);
+      applyExpressionDOM('fly');
+      setEffectDOM('thruster');
+      setHeadDOM(6, 3, -2);
+      setGazeDOM(6, 0);
+
+      const stageRect = el?.parentElement?.getBoundingClientRect();
+      const vw = typeof window !== 'undefined' ? window.innerWidth : 1024;
+      const rightTravel = embedded
+        ? Math.max(240, Math.round((stageRect?.width || vw) * 0.56))
+        : Math.max(120, Math.round(vw - posRef.current.x - 40));
+
+      if (!motionOff && el && typeof el.animate === 'function') {
+        try {
+          if (embedded) {
+            const outAnim = el.animate(
+              [
+                { transform: 'translate3d(0px, 0px, 0) rotate(0deg) scale(1)', opacity: 1 },
+                { transform: 'translate3d(18px, -14px, 0) rotate(6deg) scale(1.05)', opacity: 1, offset: 0.18 },
+                { transform: `translate3d(${Math.round(rightTravel * 0.52)}px, -26px, 0) rotate(13deg) scale(0.98)`, opacity: 0.95, offset: 0.62 },
+                { transform: `translate3d(${rightTravel}px, -30px, 0) rotate(15deg) scale(0.9)`, opacity: 0.12 },
+              ],
+              { duration: 680, easing: 'cubic-bezier(0.35, 0, 0.25, 1)', fill: 'forwards' }
+            );
+            await outAnim.finished;
+            outAnim.cancel();
+          } else {
+            const cur = posRef.current;
+            await fly(
+              [
+                { ...cur, r: 0, s: 1, o: 1 },
+                { x: cur.x + rightTravel * 0.5, y: cur.y - 24, r: 12, s: 0.96, o: 0.95, t: 0.55 },
+                { x: cur.x + rightTravel, y: cur.y - 28, r: 15, s: 0.88, o: 0.15, t: 1 },
+              ],
+              640,
+              'ease-in-out'
+            );
+          }
+
+          if (id !== gidRef.current) return;
+          cueEdge('r', el.getBoundingClientRect().top || 220, '#10b981');
+          setIsDeliveringEnvelope(false);
+          setDeliverySentBadge('تم الإيصال للممرض');
+          await sleep(260);
+          if (id !== gidRef.current) return;
+
+          setHeadDOM(-5, -2, -2);
+          setGazeDOM(-5, 0);
+          applyExpressionDOM('happy');
+
+          if (embedded) {
+            const backAnim = el.animate(
+              [
+                { transform: `translate3d(${rightTravel}px, -22px, 0) rotate(-12deg) scale(0.9)`, opacity: 0.18 },
+                { transform: `translate3d(${Math.round(rightTravel * 0.4)}px, -16px, 0) rotate(-7deg) scale(1.02)`, opacity: 0.95, offset: 0.55 },
+                { transform: 'translate3d(0px, 0px, 0) rotate(0deg) scale(1)', opacity: 1 },
+              ],
+              { duration: 580, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' }
+            );
+            await backAnim.finished;
+            backAnim.cancel();
+          } else {
+            await returnHome();
+          }
+        } catch {
+          // cancelled
+        }
+      } else {
+        setDeliverySentBadge('تم الإيصال للممرض');
+        await sleep(350);
+        setIsDeliveringEnvelope(false);
+      }
+
+      if (id === gidRef.current) {
+        setEffectDOM('sparkles');
+        applyExpressionDOM('happy');
+        setHeadDOM(0, 0, -2);
+        setGazeDOM(0, 0);
+        await sleep(550);
+        if (id === gidRef.current) {
+          actionBusyRef.current = false;
+          restDOM();
+        }
+        window.setTimeout(() => {
+          setDeliverySentBadge((curr) => (curr === 'تم الإيصال للممرض' ? null : curr));
+        }, 1800);
+      }
+    }, [applyExpressionDOM, cueEdge, embedded, fly, motionOff, restDOM, returnHome, setEffectDOM, setGazeDOM, setHeadDOM]);
+
     useImperativeHandle(ref, () => ({
       fly, cueEdge, place, moveToPointNear, returnHome,
       getHome: () => ({ ...homeRef.current }),
       getCurrentPos: () => ({ x: posRef.current.x, y: posRef.current.y }),
       getDimensions: () => getLimits(),
-      play, pointAt, stopPointing: stopPointingImperative, cancelAction, resetPosition,
-    }), [cancelAction, cueEdge, fly, getLimits, moveToPointNear, place, play, pointAt, resetPosition, returnHome, stopPointingImperative]);
+      play, deliverToNurse, pointAt, stopPointing: stopPointingImperative, cancelAction, resetPosition,
+    }), [cancelAction, cueEdge, deliverToNurse, fly, getLimits, moveToPointNear, place, play, pointAt, resetPosition, returnHome, stopPointingImperative]);
 
     useEffect(() => {
       if (embedded) return;
@@ -735,6 +834,9 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
     const armFill = hasJacket ? `url(#${fjId})` : hasCoat ? `url(#${fcId})` : `url(#${sdId})`;
     const themeClass = theme && theme !== 'white' ? `th-${theme}` : 'th-white';
 
+    const effectiveCarrying = carrying || isDeliveringEnvelope;
+    const effectiveSentBadge = sentBadge || deliverySentBadge;
+
     return (
       <div
         ref={robRef}
@@ -749,19 +851,19 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
         onClick={handleClick}
         className={`v9-rob-host no-print ${embedded ? 'embedded' : `size-${size}`} ${isDraggingUI ? 'drag' : ''} ${effectiveDragDisabled ? 'busy' : ''} ${motionOff ? 'motion-off' : ''} ${className}`.trim()}
       >
-        {envelopeCount > 0 && carrying && (
+        {envelopeCount > 0 && effectiveCarrying && (
           <span className="absolute -top-1 -left-1 z-10 min-w-[24px] h-6 px-1.5 rounded-full bg-red-500 text-white text-xs font-bold flex items-center justify-center shadow-md standard-digits" aria-label={`${envelopeCount} رسائل`}>
             {envelopeCount}
           </span>
         )}
-        {!carrying && alertBadge > 0 && !sentBadge && (
+        {!effectiveCarrying && alertBadge > 0 && !effectiveSentBadge && (
           <span className="absolute -top-1 -left-1 z-10 min-w-[24px] h-6 px-1.5 rounded-full bg-red-500 text-white text-xs font-bold flex items-center justify-center shadow-md standard-digits">
             {alertBadge}
           </span>
         )}
-        {!embedded && sentBadge && (
-          <div className="absolute -top-5 left-1/2 -translate-x-1/2 z-20 px-2.5 py-0.5 rounded-full bg-[#1e293b] text-white text-[10.5px] font-bold shadow-md whitespace-nowrap pointer-events-none">
-            {sentBadge}
+        {effectiveSentBadge && (
+          <div className="absolute -top-6 left-1/2 -translate-x-1/2 z-20 px-3 py-1 rounded-full bg-emerald-700 text-white text-[11px] font-bold shadow-md whitespace-nowrap pointer-events-none">
+            {effectiveSentBadge}
           </div>
         )}
 
@@ -805,7 +907,7 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
             <clipPath id={vcId}><rect x="98" y="98" width="164" height="108" rx="46" /></clipPath>
           </defs>
 
-          <g ref={rbRef} className={`v9-rb s-${effectivePropState} ${speaking ? 'speaking' : ''} ${carrying ? 'carry' : ''} ${envelopeOpen ? 'open' : ''} ${outfitClasses}`.trim()}>
+          <g ref={rbRef} className={`v9-rb s-${effectivePropState} ${speaking ? 'speaking' : ''} ${glowing ? 'glowing' : ''} ${effectiveCarrying ? 'carry' : ''} ${envelopeOpen ? 'open' : ''} ${outfitClasses}`.trim()}>
             <g className="v9-bot">
               <g ref={bwRef} className="v9-bw">
                 {/* Shoes */}
@@ -834,6 +936,7 @@ export const AssistantRobot = forwardRef<AssistantRobotHandle, AssistantRobotPro
                 <path d="M136 298 Q180 308 224 298" fill="none" stroke="#6b778a" strokeOpacity=".4" strokeWidth="1.5" />
                 <circle cx="180" cy="278" r="19" fill="#151b27" stroke="#dfe5ee" strokeOpacity=".8" strokeWidth="2" />
                 <circle cx="180" cy="278" r="23" fill="none" className="v9-gear v9-acs" strokeWidth="2.5" strokeDasharray="6 7" />
+                <circle cx="180" cy="278" r="14" className="v9-chest-halo v9-ac" filter={`url(#${glId})`} />
                 <circle cx="180" cy="278" r="8" className="v9-pulse v9-ac" filter={`url(#${glId})`} />
 
                 {/* Jacket */}

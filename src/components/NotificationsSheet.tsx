@@ -73,7 +73,7 @@ export const NotificationsSheet: React.FC<NotificationsSheetProps> = ({
                     ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                     : permission === 'denied'
                       ? 'bg-red-50 text-red-700 border border-red-200'
-                      : 'bg-sky-50 text-sky-700 border border-sky-200'
+                      : 'bg-emerald-50 text-emerald-700 border border-emerald-200'
                 }`}
               >
                 {permission === 'granted' ? (
@@ -103,7 +103,7 @@ export const NotificationsSheet: React.FC<NotificationsSheetProps> = ({
                 <button
                   type="button"
                   onClick={onRequestPermission}
-                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-sky-600 text-white text-xs font-bold hover:bg-sky-700 transition-colors whitespace-nowrap"
+                  className="flex-1 min-h-[44px] px-4 rounded-xl bg-emerald-600 text-white text-xs font-bold hover:bg-emerald-700 transition-colors whitespace-nowrap"
                 >
                   طلب إذن الإشعارات الآن
                 </button>
